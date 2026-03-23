@@ -1,7 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { Chargeback } from '../types';
-import { parseExcel } from '../utils/excelParser';
-import { Upload, Plus, Save, Edit2, X, Trash2, History } from 'lucide-react';
+import { parseExcel, exportToExcel } from '../utils/excelParser';
+import { Upload, Plus, Save, Edit2, X, Trash2, History, AlertCircle, Download } from 'lucide-react';
 import { auth, db } from '../firebase';
 import { doc, setDoc, deleteDoc, writeBatch, arrayUnion } from 'firebase/firestore';
 import { handleFirestoreError } from '../App';
@@ -22,6 +22,7 @@ interface DataManagementProps {
 
 export const DataManagement: React.FC<DataManagementProps> = ({ chargebacks, setChargebacks }) => {
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<Partial<Chargeback>>({});
@@ -42,6 +43,7 @@ export const DataManagement: React.FC<DataManagementProps> = ({ chargebacks, set
     if (!file || !auth.currentUser) return;
 
     setIsUploading(true);
+    setUploadError(null);
     try {
       const parsedData = await parseExcel(file);
       
@@ -56,15 +58,21 @@ export const DataManagement: React.FC<DataManagementProps> = ({ chargebacks, set
           const historyEntry = {
             timestamp: new Date().toISOString(),
             email: auth.currentUser!.email || 'unknown',
-            action: 'Created',
-            details: 'Imported via Excel'
+            action: 'Imported',
+            details: 'Updated/Imported via Excel'
           };
-          batch.set(docRef, { ...cb, uid: auth.currentUser!.uid, history: [historyEntry] });
+          batch.set(docRef, { 
+            ...cb, 
+            uid: auth.currentUser!.uid, 
+            history: arrayUnion(historyEntry) 
+          }, { merge: true });
         });
         
         await batch.commit();
       }
-    } catch (error) {
+    } catch (error: any) {
+      console.error('Upload failed:', error);
+      setUploadError(error.message || 'Failed to upload file. Please check the file format and try again.');
       handleFirestoreError(error, OperationType.WRITE, 'chargebacks');
     } finally {
       setIsUploading(false);
@@ -161,6 +169,29 @@ export const DataManagement: React.FC<DataManagementProps> = ({ chargebacks, set
     }
   };
 
+  const handleExportExcel = () => {
+    exportToExcel(chargebacks);
+  };
+
+  const handleDeleteAll = async () => {
+    if (chargebacks.length === 0) return;
+    if (!confirm('Are you ABSOLUTELY sure you want to delete ALL data? This action cannot be undone.')) return;
+    
+    try {
+      const batchSize = 500;
+      for (let i = 0; i < chargebacks.length; i += batchSize) {
+        const batch = writeBatch(db);
+        const chunk = chargebacks.slice(i, i + batchSize);
+        chunk.forEach(cb => {
+          batch.delete(doc(db, 'chargebacks', cb.id));
+        });
+        await batch.commit();
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, 'chargebacks');
+    }
+  };
+
   const formatEur = (amount: any) => {
     const num = Number(amount);
     const validAmount = isNaN(num) ? 0 : num;
@@ -169,8 +200,18 @@ export const DataManagement: React.FC<DataManagementProps> = ({ chargebacks, set
 
   return (
     <div className="space-y-6">
+      {uploadError && (
+        <div className="p-4 bg-red-50 text-red-700 rounded-xl border border-red-100 flex items-start gap-3">
+          <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
+          <div>
+            <h3 className="font-semibold">Upload Failed</h3>
+            <p className="text-sm mt-1">{uploadError}</p>
+          </div>
+        </div>
+      )}
+
       <div className="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center">
-        <div className="flex items-center gap-4">
+        <div className="flex flex-wrap items-center gap-4">
           <input
             type="file"
             accept=".xlsx, .xls, .csv"
@@ -186,7 +227,25 @@ export const DataManagement: React.FC<DataManagementProps> = ({ chargebacks, set
             <Upload className="w-4 h-4" />
             {isUploading ? 'Uploading...' : 'Upload Excel'}
           </button>
+          
+          <button
+            onClick={handleExportExcel}
+            disabled={chargebacks.length === 0}
+            className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors disabled:opacity-50"
+          >
+            <Download className="w-4 h-4" />
+            Export Excel
+          </button>
         </div>
+        
+        <button
+          onClick={handleDeleteAll}
+          disabled={chargebacks.length === 0}
+          className="flex items-center gap-2 px-4 py-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition-colors disabled:opacity-50"
+        >
+          <Trash2 className="w-4 h-4" />
+          Delete All Data
+        </button>
       </div>
 
       <div className="bg-white rounded-xl shadow-sm p-6 border border-slate-100">
